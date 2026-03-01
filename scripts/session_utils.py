@@ -156,26 +156,24 @@ def _summarize_tool_use(tool_name: str, tool_input: dict) -> str:
         return f"Tool: {tool_name}"
 
 
-def list_sessions(base_dir: str, category: str = None) -> str:
-    """List all saved sessions in the central directory.
+def _load_all_sessions(base_path: Path, category: str = None) -> list:
+    """Load all session metadata from the central directory.
 
     Args:
-        base_dir: Path to the central sessions directory
+        base_path: Path object for central sessions directory
         category: Optional category filter
+    Returns:
+        List of session metadata dicts
     """
-    base_path = Path(_normalize_path(base_dir))
-    if not base_path.exists():
-        return f"Error: Directory not found: {base_dir}"
-
     config_path = base_path / "_config.json"
     if not config_path.exists():
-        return "Error: _config.json not found. Run /recall save first to initialize."
+        return []
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-    except Exception as e:
-        return f"Error reading config: {e}"
+    except Exception:
+        return []
 
     categories = [category] if category else config.get("categories", [])
     sessions = []
@@ -192,13 +190,40 @@ def list_sessions(base_dir: str, category: str = None) -> str:
             except Exception:
                 continue
 
+    return sessions
+
+
+def list_sessions(base_dir: str, category: str = None, sort_by: str = "modified", limit: int = 0) -> str:
+    """List all saved sessions in the central directory.
+
+    Args:
+        base_dir: Path to the central sessions directory
+        category: Optional category filter
+        sort_by: Sort key — 'modified' (default), 'name', or 'count'
+        limit: Maximum number of sessions to show (0 = unlimited)
+    """
+    base_path = Path(_normalize_path(base_dir))
+    if not base_path.exists():
+        return f"Error: Directory not found: {base_dir}"
+
+    sessions = _load_all_sessions(base_path, category)
+
     if not sessions:
         if category:
             return f"No sessions found in category: {category}"
         return "No sessions saved yet."
 
-    # Sort by modified time (newest first)
-    sessions.sort(key=lambda s: s.get("modified", ""), reverse=True)
+    # Sort
+    if sort_by == "name":
+        sessions.sort(key=lambda s: s.get("name", "").lower())
+    elif sort_by == "count":
+        sessions.sort(key=lambda s: s.get("messageCount", 0), reverse=True)
+    else:  # modified (default)
+        sessions.sort(key=lambda s: s.get("modified", ""), reverse=True)
+
+    # Limit
+    if limit > 0:
+        sessions = sessions[:limit]
 
     # Format as table
     lines = []
@@ -217,6 +242,148 @@ def list_sessions(base_dir: str, category: str = None) -> str:
         if len(project) > 29:
             project = "..." + project[-26:]
         lines.append(f"{i:<4} {name:<25} {cat:<8} {str(count):<6} {modified:<12} {project:<30}")
+
+    total_info = f"\n共 {len(sessions)} 个会话"
+    if limit > 0:
+        total_info += f" (显示前 {limit} 个)"
+    lines.append(total_info)
+
+    return "\n".join(lines)
+
+
+def search_sessions(base_dir: str, keyword: str, category: str = None) -> str:
+    """Search sessions by keyword across name, summary, firstPrompt, and tags.
+
+    Args:
+        base_dir: Path to the central sessions directory
+        keyword: Search keyword (case-insensitive)
+        category: Optional category filter
+    """
+    base_path = Path(_normalize_path(base_dir))
+    if not base_path.exists():
+        return f"Error: Directory not found: {base_dir}"
+
+    sessions = _load_all_sessions(base_path, category)
+    if not sessions:
+        return "No sessions saved yet."
+
+    keyword_lower = keyword.lower()
+    matches = []
+
+    for s in sessions:
+        searchable = " ".join([
+            s.get("name", ""),
+            s.get("summary", ""),
+            s.get("firstPrompt", ""),
+            " ".join(s.get("tags", [])),
+        ]).lower()
+        if keyword_lower in searchable:
+            matches.append(s)
+
+    if not matches:
+        return f"No sessions matching '{keyword}'."
+
+    # Sort by modified (newest first)
+    matches.sort(key=lambda s: s.get("modified", ""), reverse=True)
+
+    lines = []
+    lines.append(f"搜索 '{keyword}' — 找到 {len(matches)} 个匹配:")
+    lines.append("")
+    lines.append(f"{'#':<4} {'名称':<25} {'类别':<8} {'消息数':<6} {'最后修改':<12} {'来源项目':<30}")
+    lines.append("-" * 90)
+
+    for i, s in enumerate(matches, 1):
+        name = _truncate(s.get("name", "unnamed"), 24)
+        cat = s.get("category", "?")
+        count = s.get("messageCount", "?")
+        modified = s.get("modified", "?")
+        if isinstance(modified, str) and len(modified) >= 10:
+            modified = modified[:10]
+        project = s.get("originalProject", "?")
+        if len(project) > 29:
+            project = "..." + project[-26:]
+        lines.append(f"{i:<4} {name:<25} {cat:<8} {str(count):<6} {modified:<12} {project:<30}")
+
+    return "\n".join(lines)
+
+
+def stats_sessions(base_dir: str) -> str:
+    """Show statistics overview of all saved sessions.
+
+    Args:
+        base_dir: Path to the central sessions directory
+    """
+    base_path = Path(_normalize_path(base_dir))
+    if not base_path.exists():
+        return f"Error: Directory not found: {base_dir}"
+
+    config_path = base_path / "_config.json"
+    if not config_path.exists():
+        return "Error: _config.json not found."
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        return f"Error reading config: {e}"
+
+    categories = config.get("categories", [])
+    cat_counts = {}
+    all_sessions = []
+
+    for cat in categories:
+        cat_dir = base_path / cat
+        if not cat_dir.exists():
+            cat_counts[cat] = 0
+            continue
+        count = 0
+        for meta_file in cat_dir.glob("*_meta.json"):
+            try:
+                with open(meta_file, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                all_sessions.append(meta)
+                count += 1
+            except Exception:
+                continue
+        cat_counts[cat] = count
+
+    total_sessions = len(all_sessions)
+    total_messages = sum(s.get("messageCount", 0) for s in all_sessions)
+
+    lines = []
+    lines.append("=== Recall 统计概览 ===")
+    lines.append("")
+    lines.append(f"总会话数: {total_sessions}")
+    lines.append(f"总消息数: {total_messages}")
+    lines.append(f"类别数:   {len(categories)}")
+    lines.append("")
+
+    # Per-category table
+    lines.append(f"{'类别':<10} {'会话数':<8} {'消息数':<10}")
+    lines.append("-" * 30)
+    for cat in categories:
+        count = cat_counts.get(cat, 0)
+        cat_messages = sum(
+            s.get("messageCount", 0) for s in all_sessions if s.get("category") == cat
+        )
+        lines.append(f"{cat:<10} {count:<8} {cat_messages:<10}")
+
+    if all_sessions:
+        lines.append("")
+        # Most active category
+        most_active = max(cat_counts, key=cat_counts.get)
+        lines.append(f"最活跃类别: {most_active} ({cat_counts[most_active]} 个会话)")
+
+        # Largest session
+        largest = max(all_sessions, key=lambda s: s.get("messageCount", 0))
+        lines.append(f"最大会话:   {largest.get('name', '?')} ({largest.get('messageCount', 0)} 条消息)")
+
+        # Time range
+        saved_times = [s.get("saved", "") for s in all_sessions if s.get("saved")]
+        if saved_times:
+            earliest = min(saved_times)[:10]
+            latest = max(saved_times)[:10]
+            lines.append(f"时间范围:   {earliest} ~ {latest}")
 
     return "\n".join(lines)
 
@@ -297,6 +464,20 @@ def main():
     list_parser = subparsers.add_parser("list", help="List saved sessions")
     list_parser.add_argument("base_dir", help="Path to the central sessions directory")
     list_parser.add_argument("--category", help="Filter by category")
+    list_parser.add_argument("--sort", choices=["modified", "name", "count"], default="modified",
+                             help="Sort by: modified (default), name, or count")
+    list_parser.add_argument("--limit", type=int, default=0,
+                             help="Maximum sessions to show (0 = unlimited)")
+
+    # search subcommand
+    search_parser = subparsers.add_parser("search", help="Search sessions by keyword")
+    search_parser.add_argument("base_dir", help="Path to the central sessions directory")
+    search_parser.add_argument("keyword", help="Search keyword")
+    search_parser.add_argument("--category", help="Filter by category")
+
+    # stats subcommand
+    stats_parser = subparsers.add_parser("stats", help="Show statistics overview")
+    stats_parser.add_argument("base_dir", help="Path to the central sessions directory")
 
     # check subcommand
     check_parser = subparsers.add_parser("check", help="Check original file existence")
@@ -307,7 +488,11 @@ def main():
     if args.command == "extract":
         print(extract_session(args.jsonl_path, args.mode, args.max_messages, args.max_chars))
     elif args.command == "list":
-        print(list_sessions(args.base_dir, args.category))
+        print(list_sessions(args.base_dir, args.category, args.sort, args.limit))
+    elif args.command == "search":
+        print(search_sessions(args.base_dir, args.keyword, args.category))
+    elif args.command == "stats":
+        print(stats_sessions(args.base_dir))
     elif args.command == "check":
         print(check_sessions(args.base_dir))
     else:

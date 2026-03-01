@@ -5,9 +5,9 @@ description: |
   manage conversations across different projects and directories.
 
   Trigger on /recall command or these specific phrases:
-  - "/recall", "/recall save", "/recall list", "/recall load", "/recall resume", "/recall rename", "/recall move", "/recall manage"
-  - "recall save", "recall list", "recall load", "recall resume", "recall rename", "recall move"
-  - "recall 保存", "recall 列出", "recall 加载", "recall 恢复", "recall 重命名", "recall 移动"
+  - "/recall", "/recall save", "/recall list", "/recall load", "/recall resume", "/recall rename", "/recall move", "/recall manage", "/recall browse"
+  - "recall save", "recall list", "recall load", "recall resume", "recall rename", "recall move", "recall browse"
+  - "recall 保存", "recall 列出", "recall 加载", "recall 恢复", "recall 重命名", "recall 移动", "recall 浏览"
 
   Do NOT trigger on generic phrases like "save session" or "保存会话" alone — only when "recall" is explicitly mentioned or /recall is used.
 ---
@@ -72,12 +72,13 @@ Parse the ARGUMENTS value to determine which command to execute:
 
 - No arguments or empty → **Entry Menu**
 - `save` → **Save Session**
-- `list` → **List Sessions**
+- `list` → **List Sessions** (supports sub-args: `search <keyword>`, `recent [N]`, `stats`)
 - `load` → **Load Context**
 - `resume` → **Resume Session**
 - `rename` → **Rename Session**
 - `move` → **Move Category**
 - `manage` → **Manage Categories**
+- `browse` → **Interactive Browse** (visual hierarchical navigation)
 
 If ARGUMENTS doesn't match any command, treat it as a natural language query and infer the closest command, then confirm with the user.
 
@@ -92,6 +93,7 @@ question: "Recall — 你想执行什么操作？"
 options:
   - "save — 保存当前会话到中央目录"
   - "list — 列出所有已保存的会话"
+  - "browse — 可视化交互浏览（类别→会话→操作）"
   - "load — 加载历史会话作为参考上下文"
   - "resume — 从中央目录恢复一个会话"
   - "rename — 重命名已保存的会话"
@@ -139,7 +141,15 @@ options:
 
 ## Command 2: List Sessions (`/recall list`)
 
-### Workflow
+### Sub-argument Routing
+
+Parse additional arguments after `list`:
+- `list` (no sub-arg) → Original behavior (choose category → table)
+- `list search <keyword>` → Search across all sessions
+- `list recent [N]` → Show most recent N sessions (default 10)
+- `list stats` → Show statistics overview
+
+### Workflow (default — no sub-arg)
 
 1. Read `_config.json` to get basePath and categories
 2. Use `AskUserQuestion` to let user choose:
@@ -157,6 +167,28 @@ options:
 ```
 
 6. After showing the table, ask user if they want to perform an action on any session (load, resume, rename, move)
+
+### Workflow: Search (`/recall list search <keyword>`)
+
+1. Run: `python session_utils.py search "{basePath}" "{keyword}"`
+2. The script searches name, summary, firstPrompt, and tags fields (case-insensitive)
+3. Display matching sessions as a table
+4. If no matches found, tell the user and suggest trying different keywords
+
+### Workflow: Recent (`/recall list recent [N]`)
+
+1. Run: `python session_utils.py list "{basePath}" --sort modified --limit {N}`
+2. Display the N most recently modified sessions across all categories
+3. Default N=10 if not specified
+
+### Workflow: Stats (`/recall list stats`)
+
+1. Run: `python session_utils.py stats "{basePath}"`
+2. Display statistics including:
+   - Total session count and total message count
+   - Per-category session counts
+   - Most active category, largest session
+   - Time range (earliest to latest save time)
 
 ---
 
@@ -264,6 +296,79 @@ options:
 
 ---
 
+## Command 8: Interactive Browse (`/recall browse`)
+
+A visual, hierarchical navigation interface using `AskUserQuestion` clickable options. Designed for managing large numbers of sessions (hundreds or thousands).
+
+### Architecture: 3-Layer Navigation
+
+```
+Layer 1: Category Overview → Layer 2: Session List → Layer 3: Session Detail + Actions
+```
+
+### Layer 1 — Category Overview
+
+1. Read `_config.json` + scan all category directories for `_meta.json` files
+2. Count sessions per category, **filter out empty categories** (0 sessions)
+3. For each non-empty category, find the most recently modified session as preview
+4. Display using `AskUserQuestion`:
+   - **question**: `"Recall 浏览 — 选择一个类别"`
+   - **options**: Each non-empty category as an option
+     - **label**: `"{类别名} ({N}个会话)"`
+     - **description**: `"最近: {最新会话名} ({日期})"`
+   - If non-empty categories > 3: use pagination
+     - Show first 2 categories + "更多类别..." + "退出浏览"
+     - "更多类别..." shows the next batch
+   - If non-empty categories <= 3: show all + "退出浏览"
+5. User selects a category → go to Layer 2
+
+### Layer 2 — Session List (within a category)
+
+1. Scan the selected category's `_meta.json` files, sort by `modified` descending
+2. Display sessions using `AskUserQuestion`:
+   - **question**: `"📂 {类别名} — {N}个会话 (第 {page}/{totalPages} 页)"`
+   - **options**: Up to 3 sessions per page
+     - **label**: Session name
+     - **description**: `"{messageCount}条消息 | {modified日期} | {firstPrompt前30字}"`
+   - Navigation options:
+     - If more pages exist: include "下一页 →" option
+     - Always include "← 返回类别列表" as last option
+   - Pagination: 3 sessions per page. Page indicator in question text.
+3. User selects a session → go to Layer 3
+4. User selects "← 返回" → go back to Layer 1
+5. User selects "下一页 →" → show next page of sessions
+
+### Layer 3 — Session Detail + Actions
+
+1. Read the selected session's `_meta.json` for full details
+2. Display detail in the **question** text:
+   ```
+   📋 {name}
+   ─────────────────
+   类别: {category}
+   消息数: {messageCount}
+   来源项目: {originalProject}
+   创建时间: {created}
+   最后修改: {modified}
+   摘要: {summary}
+   首条消息: {firstPrompt前80字}
+   标签: {tags}
+   ```
+3. **options** are executable actions:
+   - **"load — 加载为参考上下文"**: Jump to Command 3 (Load Context) workflow with this session pre-selected
+   - **"resume — 恢复此会话"**: Jump to Command 4 (Resume) workflow with this session pre-selected
+   - **"rename / move — 重命名或移动"**: Ask user which one, then jump to Command 5 or 6
+   - **"← 返回会话列表"**: Go back to Layer 2
+
+### Implementation Notes
+
+- The browse command is a **loop**: after each action completes, offer to return to browse
+- All AskUserQuestion calls use `multiSelect: false` (single selection)
+- Session data is read once at the start and cached for the browse session
+- If the user types "Other" at any point, treat it as exit/cancel
+
+---
+
 ## Helper Script Reference
 
 The Python helper script is located at:
@@ -276,7 +381,13 @@ The Python helper script is located at:
 python session_utils.py extract <jsonl_path> [--mode brief|detailed] [--max-messages 30] [--max-chars 500]
 
 # List all sessions in the central directory
-python session_utils.py list <base_dir> [--category <name>]
+python session_utils.py list <base_dir> [--category <name>] [--sort modified|name|count] [--limit N]
+
+# Search sessions by keyword
+python session_utils.py search <base_dir> <keyword> [--category <name>]
+
+# Show statistics overview
+python session_utils.py stats <base_dir>
 
 # Check if original session files still exist
 python session_utils.py check <base_dir>
