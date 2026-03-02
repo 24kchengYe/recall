@@ -66,6 +66,10 @@ D:\claude-sessions\               ← Central directory (configurable)
 ### Save & Organize
 Save any conversation to a central location with a custom name and category. Default categories: 学习, 生活, 代码, 算法, 论文, 工作, 杂项 — fully customizable.
 
+**Auto-update**: If you save a session that was previously saved, Recall automatically updates the backup without asking — no need to re-select name or category. Just `/recall save` again whenever you want a fresh snapshot.
+
+**Filesystem-first session detection**: Recall identifies the current session by checking which `.jsonl` file was most recently modified on disk, not by relying on `sessions-index.json` (which can be stale). This ensures accurate detection even when Claude Code hasn't updated its index.
+
 ### Cross-Project Context Loading (`/recall load`)
 The killer feature. Load content from a past conversation into your **current** session as reference context. Two modes:
 - **Brief**: User questions + assistant text answers only
@@ -85,7 +89,13 @@ Visual, clickable hierarchical navigation designed for managing large numbers of
 - **Stats**: Overview of total sessions, messages, per-category counts, most active category, largest session
 
 ### Resume from Anywhere
-Browse your central index, select a session, and Recall tells you exactly where the original lives and how to resume it — or restores it from backup if the original was deleted.
+Browse your central index, select a session, and Recall helps you resume it — even if it's from a different project:
+
+- **Same project**: Shows the `claude --resume` command directly
+- **Different project**: Offers to open a **new VSCode window** or **new terminal** at the target project directory, then provides the resume command to paste
+- **Original deleted**: Restores from backup automatically, then provides the resume command
+
+No more manually hunting for which directory a conversation lives in.
 
 ### Bidirectional Rename
 When you rename a session in Recall, it updates **both** the central index and the original project's `sessions-index.json`. No desync.
@@ -132,6 +142,8 @@ For those curious about the internals:
 - Context compression creates `compact_boundary` markers in long sessions
 
 Recall reads these native files and builds an index on top of them — it doesn't modify or replace Claude Code's storage, just adds a cross-project management layer.
+
+**Important finding**: `sessions-index.json` is **not always up to date**. Claude Code uses incremental updates — it adds entries on session creation and rename, but does NOT rebuild the full index. Many sessions may exist as `.jsonl` files on disk without having an entry in the index. Recall handles this by using filesystem modification times as the primary session detection method.
 
 ## Recall vs. Built-in Commands
 

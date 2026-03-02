@@ -29,6 +29,7 @@ Recall is a centralized session management system for Claude Code. It solves the
 
 - This skill is **independent** from Claude Code's built-in `/resume` and `/rename` commands
 - Built-in `/resume` only shows current project sessions; Recall shows ALL projects
+- `recall save` is a superset of `/rename`: it syncs the name to Claude's local sessions-index.json AND saves to central directory — using Recall makes `/rename` unnecessary
 - Always use `AskUserQuestion` to confirm user intent before executing any operation
 - All file paths must handle Windows paths correctly (backslashes, Chinese characters, spaces)
 
@@ -113,29 +114,62 @@ options:
    - Create directory structure: base dir + all default category subdirs
    - Write `_config.json`
 
-2. **Find current session**:
+2. **Find current session** (filesystem-first approach):
    - Determine current working directory (use `pwd` via Bash)
-   - Convert to Claude projects directory name:
-     - Replace `:` with empty, `\` or `/` with `--`
-     - Example: `G:\Research_20250121\...` → `G--Research-20250121-...`
-   - Read `C:\Users\ASUS\.claude\projects\{projectDir}\sessions-index.json`
-   - Find the entry with the most recent `modified` timestamp (this is the current session)
+   - Find the Claude projects directory for this project:
+     - List `C:\Users\ASUS\.claude\projects\` directories
+     - Match by checking which directory name corresponds to the current `pwd`
+     - Path conversion rules: remove colon after drive letter, replace `\` or `/` with `--`, non-ASCII and special chars become dashes
+     - If unsure, compare `projectPath` in `sessions-index.json` with current `pwd`
+   - **Primary method — filesystem modification time** (reliable, works even when sessions-index.json is stale):
+     - List all `*.jsonl` files in `C:\Users\ASUS\.claude\projects\{projectDir}\` sorted by modification time (newest first):
+       ```bash
+       ls -t "C:\Users\ASUS\.claude\projects\{projectDir}\"*.jsonl | head -1
+       ```
+     - The most recently modified `.jsonl` file IS the current session (it's being actively written to)
+     - Extract sessionId from filename: e.g., `ed47c07e-9ecf-45e3-be1a-948d81d4a378.jsonl` → sessionId = `ed47c07e-9ecf-45e3-be1a-948d81d4a378`
+   - **Get metadata** — try `sessions-index.json` first, fall back to `.jsonl` parsing:
+     - Read `sessions-index.json` and look for the matching sessionId
+     - If found: use its `summary`, `messageCount`, `firstPrompt`, `created`, `modified` fields
+     - If NOT found (index is stale — this is common!): extract basic info from the `.jsonl` file:
+       - `firstPrompt`: read first few lines of the `.jsonl`, find the first user message's content
+       - `messageCount`: count lines with `wc -l` as rough estimate
+       - `summary`: use firstPrompt as fallback summary (truncated to 50 chars)
+       - `created`: use file creation time from filesystem
+       - `modified`: use file modification time from filesystem
 
-3. **Get user input** via `AskUserQuestion`:
-   - **Session name**: Default to the `summary` field from sessions-index. Let user type a custom name via "Other" option.
+3. **Check if this session was previously saved** (auto-update detection):
+   - Scan ALL `_meta.json` files across all categories in the central directory (use Glob: `{basePath}/**/*_meta.json`)
+   - Look for any `_meta.json` where `sessionId` matches the current session's sessionId
+   - **If found (previously saved)** → **Auto-update mode**:
+     - Skip name/category selection — reuse existing name and category
+     - Overwrite the `.jsonl` backup with the latest version: `cp` source → existing `backupFile` path
+     - Update `_meta.json`: refresh `modified` timestamp, `messageCount`, and `saved` timestamp
+     - Report: "已自动更新备份: {name} ({category})"
+     - **Done** — skip steps 4 and 5
+   - **If not found (first save)** → continue to step 4
+
+4. **Get user input** via `AskUserQuestion` (first save only):
+   - **Session name**: Default to the `summary` field (from sessions-index if available, or firstPrompt fallback). Let user type a custom name via "Other" option.
    - **Category**: Show existing categories from `_config.json` + "新建类别" option
 
-4. **Execute save**:
+5. **Execute save** (first save only):
    - If user chose a new category: create the subdirectory and update `_config.json`
    - Copy the `.jsonl` file to `{basePath}/{category}/{name}.jsonl` using Bash `cp`
    - Create `{basePath}/{category}/{name}_meta.json` with all metadata
+   - **Sync name back to Claude local storage**:
+     - Read `sessions-index.json` and check if an entry with matching sessionId exists
+     - If entry exists: update its `summary` field to the user-defined name
+     - If entry does NOT exist (stale index): **add a new entry** to the entries array with all available fields (sessionId, fullPath, summary, messageCount, firstPrompt, created, modified, projectPath, etc.)
+     - Write back `sessions-index.json`
    - Report success with the save location
 
 ### Key Details
 
 - Sanitize the session name for use as filename (replace special chars)
-- If a file with the same name already exists in that category, ask user whether to overwrite or use a different name
+- If a file with the same name already exists in that category but has a DIFFERENT sessionId, ask user whether to overwrite or use a different name
 - Store the current timestamp as `saved`, preserve original `created` and `modified`
+- **Auto-update**: When a session is saved again, the update is silent and fast — no user interaction needed
 
 ---
 
@@ -223,17 +257,65 @@ Parse additional arguments after `list`:
 
 1. List sessions (same as list command)
 2. User selects a session to resume
-3. Read the session's `_meta.json` to get `originalSessionFile` and `originalProject`
+3. Read the session's `_meta.json` to get `sessionId`, `originalSessionFile`, and `originalProject`
 4. Check if the original file still exists (use Bash `test -f`)
-5. **If original exists**:
-   - Tell user: "该会话来自项目: `{originalProject}`"
-   - Tell user: "请在该项目目录下打开 Claude Code，然后使用 `/resume` 恢复会话"
-   - Provide the session ID for reference
-6. **If original is missing**:
+5. **If original is missing** (restore first):
    - Inform user the original was deleted but backup exists
-   - Ask if they want to restore: copy backup `.jsonl` back to the Claude projects directory
-   - If yes: copy file, update `sessions-index.json` in the target project directory
-   - Tell user they can now `/resume` in that project
+   - Ask if they want to restore: copy backup `.jsonl` back to the original Claude projects directory
+   - If yes:
+     - Copy backup `.jsonl` to `C:\Users\ASUS\.claude\projects\{originalProjectDir}\{sessionId}.jsonl`
+     - Update `sessions-index.json` in the target project directory (add entry if missing)
+   - If no: abort
+6. **Determine if same project or different project**:
+   - Get current working directory via `pwd`
+   - Compare with `originalProject` from `_meta.json`
+   - **Same project**: just tell user to exit and run `claude --resume {sessionId}`
+   - **Different project**: proceed to step 7
+7. **Ask user for resume method** via `AskUserQuestion`:
+   - **Option A: "VSCode 新窗口打开项目"** — Opens a new VSCode window at the project, user resumes in its terminal
+   - **Option B: "新终端窗口"** — Opens a new Git Bash / terminal window at the project
+   - **Option C: "只显示命令"** — Just show the command to copy
+8. **Execute chosen method**:
+
+   **Option A — VSCode new window** (recommended for VSCode users):
+   - Run via Bash: `code "{originalProject}"`
+   - This opens a NEW VSCode window at the target project
+   - Display to user:
+     ```
+     已在 VSCode 中打开项目: {originalProject}
+
+     请在新窗口的终端中执行：
+     claude --resume {sessionId}
+     ```
+
+   **Option B — New terminal window**:
+   - Run via Bash: `start "" "C:\Program Files\Git\git-bash.exe" --cd="{originalProject}"`
+   - This opens a new Git Bash window already `cd`'d to the project
+   - Display to user:
+     ```
+     已打开新终端窗口，位于: {originalProject}
+
+     请在新终端中执行：
+     claude --resume {sessionId}
+     ```
+   - **Fallback** (if Git Bash not found): `cmd /c start cmd /k "cd /d {originalProject}"`
+
+   **Option C — Show command only**:
+   - Display in a code block:
+     ```
+     会话: {name} ({category})
+     项目: {originalProject}
+
+     请在新终端中执行：
+     cd "{originalProject}" && claude --resume {sessionId}
+     ```
+
+### Notes
+
+- The `code` command opens a new VSCode window — it does NOT affect the current window
+- Git Bash's `--cd=` flag sets the starting directory for the new window
+- The user still needs to manually type `claude --resume {sessionId}` in the new window's terminal — there is no reliable way to auto-execute commands in a newly opened terminal
+- If Windows Terminal (`wt`) is available, prefer it: `wt -d "{originalProject}" cmd /k "claude --resume {sessionId}"` (this CAN auto-execute)
 
 ---
 
