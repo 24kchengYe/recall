@@ -313,7 +313,10 @@ Parse additional arguments after `list`:
      ```
 
    **Method: Windows Terminal 新标签页**:
-   - Run via Bash: `wt -w 0 new-tab -d "{originalProject}"`
+   - **IMPORTANT**: `wt` is often NOT in PATH when running inside Git Bash/MINGW64. Use the full path with fallback:
+     ```bash
+     wt.exe -w 0 new-tab -d "{originalProject}" 2>/dev/null || "$LOCALAPPDATA/Microsoft/WindowsApps/wt.exe" -w 0 new-tab -d "{originalProject}"
+     ```
    - This opens a new tab in the CURRENT Windows Terminal window, already cd'd to the project
    - Display to user:
      ```
@@ -324,6 +327,7 @@ Parse additional arguments after `list`:
      ```
    - Note: `wt -w 0` targets the current WT window; `new-tab -d` sets the working directory
    - The new tab inherits the default profile (usually PowerShell or CMD)
+   - **Fallback path**: `$LOCALAPPDATA/Microsoft/WindowsApps/wt.exe` (standard install location for Windows Store apps)
 
    **Method: 新终端窗口** (standalone Git Bash):
    - Run via Bash: `start "" "C:\Program Files\Git\git-bash.exe" --cd="{originalProject}"`
