@@ -15,3 +15,6 @@ desktop.ini
 # Session data (don't commit actual sessions)
 *.jsonl
 _config.json
+_index.sqlite
+_index.sqlite-wal
+_index.sqlite-shm

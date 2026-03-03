@@ -5,11 +5,13 @@ description: |
   manage conversations across different projects and directories.
 
   Trigger on /recall command or these specific phrases:
-  - "/recall", "/recall save", "/recall list", "/recall load", "/recall resume", "/recall rename", "/recall move", "/recall manage", "/recall browse", "/recall history"
-  - "recall save", "recall list", "recall load", "recall resume", "recall rename", "recall move", "recall browse", "recall history"
-  - "recall 保存", "recall 列出", "recall 加载", "recall 恢复", "recall 重命名", "recall 移动", "recall 浏览", "recall 历史"
+  - "/recall", "/recall save", "/recall list", "/recall load", "/recall resume", "/recall rename", "/recall move", "/recall manage", "/recall browse", "/recall history", "/recall search", "/recall context", "/recall notify", "/recall reindex"
+  - "recall save", "recall list", "recall load", "recall resume", "recall rename", "recall move", "recall browse", "recall history", "recall search", "recall context", "recall notify", "recall reindex"
+  - "recall 保存", "recall 列出", "recall 加载", "recall 恢复", "recall 重命名", "recall 移动", "recall 浏览", "recall 历史", "recall 搜索", "recall 上下文", "recall 通知"
+  - "根据之前的讨论", "之前我们聊过", "之前的会话"
 
   Do NOT trigger on generic phrases like "save session" or "保存会话" alone — only when "recall" is explicitly mentioned or /recall is used.
+  Exception: "根据之前的讨论", "之前我们聊过", "之前的会话" should trigger the /recall context command.
 ---
 
 # Recall — Cross-Project Session Management Hub
@@ -82,8 +84,13 @@ Parse the ARGUMENTS value to determine which command to execute:
 - `manage` → **Manage Categories**
 - `browse` → **Interactive Browse** (visual hierarchical navigation)
 - `history` → **Version History** (view/compare/rollback git-versioned snapshots)
+- `search <query>` → **Semantic Search** (embedding-based or keyword search)
+- `context` → **Smart Context Injection** (auto-retrieve relevant history)
+- `notify setup` → **Notification Setup** (configure WeChat notifications via Server酱)
+- `reindex` → **Reindex All** (regenerate summaries + rebuild search index)
 
 If ARGUMENTS doesn't match any command, treat it as a natural language query and infer the closest command, then confirm with the user.
+If the user says "根据之前的讨论", "之前我们聊过", or "之前的会话", treat it as `/recall context`.
 
 ---
 
@@ -96,6 +103,8 @@ question: "Recall — 你想执行什么操作？"
 options:
   - "save — 保存当前会话到中央目录"
   - "list — 列出所有已保存的会话"
+  - "search — 语义搜索历史会话 (v2.0)"
+  - "context — 智能记忆注入 (v2.0)"
   - "browse — 可视化交互浏览（类别→会话→操作）"
   - "history — 查看会话版本历史（对比/回滚）"
   - "load — 加载历史会话作为参考上下文"
@@ -103,6 +112,8 @@ options:
   - "rename — 重命名已保存的会话"
   - "move — 移动会话到其他类别"
   - "manage — 管理类别（增删、统计）"
+  - "reindex — 重建所有会话的摘要和搜索索引 (v2.0)"
+  - "notify setup — 配置微信通知 (v2.0)"
 ```
 
 ---
@@ -147,7 +158,9 @@ options:
    - **If found (previously saved)** → **Auto-update mode**:
      - Skip name/category selection — reuse existing name and category
      - Overwrite the `.jsonl` backup with the latest version: `cp` source → existing `backupFile` path
-     - Update `_meta.json`: refresh `modified` timestamp, `messageCount`, and `saved` timestamp
+     - **Generate/update summary** (v2.0): run `python session_utils.py summarize "{backupFile}"` to get structured summary + tags, update `_meta.json` fields `summary` and `tags`
+     - Update `_meta.json`: refresh `modified` timestamp, `messageCount`, `saved` timestamp, `summary`, `tags`
+     - **Update search index** (v2.0): run `python recall_search.py index-one "{basePath}" "{sessionId}"` to refresh the embedding
      - **Git commit**: run `cd "{basePath}" && git add "{category}/{name}.jsonl" "{category}/{name}_meta.json" && git commit -m "update: {name} ({category}) - {messageCount}条消息"`
      - Report: "已自动更新备份: {name} ({category})"
      - **Done** — skip steps 4 and 5
@@ -160,7 +173,8 @@ options:
 5. **Execute save** (first save only):
    - If user chose a new category: create the subdirectory and update `_config.json`
    - Copy the `.jsonl` file to `{basePath}/{category}/{name}.jsonl` using Bash `cp`
-   - Create `{basePath}/{category}/{name}_meta.json` with all metadata
+   - **Generate summary** (v2.0): run `python session_utils.py summarize "{basePath}/{category}/{name}.jsonl"` to get structured summary + tags
+   - Create `{basePath}/{category}/{name}_meta.json` with all metadata (including `summary` and `tags` from the generated summary)
    - **Sync name back to Claude local storage**:
      - Read `sessions-index.json` and check if an entry with matching sessionId exists
      - If entry exists: update its `summary` field to the user-defined name
@@ -636,6 +650,165 @@ This is an extension of the Load Context command (Command 3) that loads a specif
 
 ---
 
+## Command 10: Semantic Search (`/recall search <query>`) — v2.0
+
+Embedding-based or keyword search across all saved sessions.
+
+### Workflow
+
+1. Read `_config.json` to get basePath
+2. Run the semantic search script:
+   ```bash
+   python "C:\Users\ASUS\.claude\skills\recall\scripts\recall_search.py" search "{basePath}" "{query}" --top-k 5
+   ```
+3. The script automatically chooses:
+   - **Semantic search** (if OpenAI API key is configured): embeds the query, computes cosine similarity against all session embeddings
+   - **Keyword search** (fallback): scores sessions by keyword matches in name, summary, tags, firstPrompt
+4. Display results as a table with similarity/relevance score
+5. After showing results, ask user if they want to:
+   - **Load** one of the matching sessions as context
+   - **Open** the session detail (jump to browse Layer 3)
+
+### First-time Setup
+
+If the search index (`{basePath}/_index.sqlite`) doesn't exist yet, tell the user:
+- "搜索索引尚未创建。正在为所有已保存会话建立索引..."
+- Run: `python recall_search.py index "{basePath}"`
+- Then proceed with the search
+
+### Embedding Configuration
+
+For semantic search (optional but recommended), the user needs an OpenAI API key:
+- Set via environment: `export OPENAI_API_KEY=sk-xxx`
+- Or add to `_config.json`: `"openai_api_key": "sk-xxx"`
+- Without an API key, the system falls back to keyword search (still useful!)
+
+---
+
+## Command 11: Smart Context Injection (`/recall context`) — v2.0
+
+Automatically retrieves and injects relevant historical session summaries based on the current conversation topic.
+
+### Trigger Phrases
+
+- `/recall context`
+- "根据之前的讨论" (automatically detected)
+- "之前我们聊过" (automatically detected)
+- "之前的会话" (automatically detected)
+
+### Workflow
+
+1. **Extract current topic**: Analyze the most recent 3-5 user messages in the current conversation to identify key topics/keywords
+2. **Search for related sessions**: Run the semantic search:
+   ```bash
+   python "C:\Users\ASUS\.claude\skills\recall\scripts\recall_search.py" search "{basePath}" "{extracted_topic}" --top-k 3
+   ```
+3. **Parse results**: Extract the JSON results from the script output (after "--- JSON ---" marker)
+4. **Load summaries**: For each matched session, read its `_meta.json` to get the `summary` field
+5. **Display injected context**:
+   ```
+   --- 相关历史上下文 (自动检索) ---
+   [会话: {name1}] ({category1}, {date1}) {summary1}
+   [会话: {name2}] ({category2}, {date2}) {summary2}
+   [会话: {name3}] ({category3}, {date3}) {summary3}
+   --- 上下文结束 (如需完整内容请用 /recall load) ---
+   ```
+6. Continue the conversation with this context available
+
+### Key Design Principles
+
+- Total injected token budget: ~600 tokens (3 sessions × ~200 tokens each)
+- Only inject **summaries**, never full conversation content (that's what `/recall load` is for)
+- If no related sessions found, say: "未找到与当前主题相关的历史会话。"
+- If search index doesn't exist, suggest running `/recall reindex` first
+
+---
+
+## Command 12: Notification Setup (`/recall notify setup`) — v2.0
+
+Configure WeChat notifications via Server酱 (ServerChan) for task completion alerts.
+
+### Workflow
+
+1. Read current `_config.json` to check existing notify configuration
+2. Use `AskUserQuestion` to guide setup:
+   ```
+   question: "Recall 微信通知配置"
+   options:
+     - "配置 Server酱 SENDKEY"
+     - "测试通知"
+     - "启用/禁用通知"
+     - "查看当前配置"
+   ```
+
+3. **配置 SENDKEY**:
+   - Tell user: "请前往 https://sct.ftqq.com/ 注册并获取 SENDKEY"
+   - Ask user to input their SENDKEY (via AskUserQuestion "Other" option)
+   - Update `_config.json`:
+     ```json
+     {
+       "notify": {
+         "provider": "serverchan",
+         "sendkey": "SCTxxx",
+         "enabled": true
+       }
+     }
+     ```
+   - Git commit the config change
+
+4. **测试通知**:
+   - Run: `echo '{"task_subject": "测试通知", "status": "completed", "cwd": "'$(pwd)'"}' | python "C:\Users\ASUS\.claude\skills\recall\scripts\recall_notify.py"`
+   - Tell user to check their WeChat for the test notification
+
+5. **启用/禁用**:
+   - Toggle `notify.enabled` in `_config.json`
+
+### Notes
+
+- Server酱 is completely free for basic usage (up to 5 messages/day on free tier)
+- The `TaskCompleted` hook is registered in `~/.claude/settings.json` — it fires when any task in Claude Code's task list is marked as completed
+- Notifications include: task title, completion status, project path
+
+---
+
+## Command 13: Reindex All Sessions (`/recall reindex`) — v2.0
+
+Regenerate summaries and rebuild the search index for all saved sessions. Essential for:
+- Existing sessions saved before v2.0 (which have empty summary/tags)
+- After upgrading to v2.0
+- Periodic index refresh
+
+### Workflow
+
+1. Read `_config.json` to get basePath and categories
+2. **Phase 1: Regenerate summaries** for all sessions:
+   - For each `_meta.json` in all categories:
+     - Find the corresponding `.jsonl` backup file
+     - Run: `python session_utils.py summarize "{backupFile}"`
+     - Parse the JSON output (summary + tags)
+     - Update `_meta.json` with the new `summary` and `tags` fields
+     - Report progress: "正在处理: {name} ({category})..."
+3. **Phase 2: Rebuild search index**:
+   - Run: `python recall_search.py index "{basePath}"`
+   - This creates/updates `_index.sqlite` with all session data and embeddings
+4. **Git commit**: `cd "{basePath}" && git add -A && git commit -m "reindex: 重建所有会话摘要和搜索索引"`
+5. Report:
+   ```
+   Reindex 完成:
+   - {N} 个会话已更新摘要
+   - 搜索索引已重建 ({M} 条记录)
+   - Embedding: {OpenAI/未配置}
+   ```
+
+### Notes
+
+- This can take a while for large collections (each session needs JSONL parsing)
+- If OpenAI API key is configured, each session also gets an embedding (~$0.02/百万token, almost free)
+- Without API key, only keyword search will work (still useful)
+- Safe to run multiple times — it overwrites previous index data
+
+---
+
 ## Helper Script Reference
 
 The Python helper script is located at:
@@ -661,11 +834,47 @@ python session_utils.py check <base_dir>
 
 # Compare two versions of a session (extract incremental content + detect compaction)
 python session_utils.py diff <old_jsonl_path> <new_jsonl_path> [--mode brief|detailed] [--max-messages 50] [--max-chars 500]
+
+# Generate structured summary and tags from a session (v2.0)
+python session_utils.py summarize <jsonl_path> [--max-chars 300]
+# Output: JSON {"summary": "...", "tags": ["..."]}
 ```
+
+### Semantic Search Script (v2.0)
+
+Located at: `C:\Users\ASUS\.claude\skills\recall\scripts\recall_search.py`
+
+```bash
+# Index all sessions (build/rebuild search database)
+python recall_search.py index <base_dir>
+
+# Index a single session (after save/update)
+python recall_search.py index-one <base_dir> <session_id>
+
+# Semantic search (uses embeddings if available, falls back to keyword)
+python recall_search.py search <base_dir> <query> [--top-k 5]
+
+# Keyword-only search
+python recall_search.py keyword <base_dir> <query>
+```
+
+### Auto-Save Script (v2.0)
+
+Located at: `C:\Users\ASUS\.claude\skills\recall\scripts\recall_autosave.py`
+- Triggered by `SessionEnd` hook
+- Reads JSON from stdin, updates previously-saved sessions only
+- Silently skips if session was never saved via `/recall save`
+
+### Notification Script (v2.0)
+
+Located at: `C:\Users\ASUS\.claude\skills\recall\scripts\recall_notify.py`
+- Triggered by `TaskCompleted` hook
+- Sends WeChat notification via Server酱 API
+- Configured via `_config.json` `notify` field
 
 ### When to use the helper vs. direct tools
 
-- **Use helper for**: Extracting session content (parsing large JSONL efficiently)
+- **Use helper for**: Extracting session content, generating summaries, semantic search (parsing large JSONL efficiently)
 - **Use direct tools for**: Reading/writing meta.json, copying files, reading config (simpler operations)
 
 ---

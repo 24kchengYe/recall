@@ -60,7 +60,9 @@ Recall creates a **centralized session index** — a management layer that maps 
 | Command | Description |
 |---------|-------------|
 | `/recall` | Show interactive action menu |
-| `/recall save` | Save current session to central directory |
+| `/recall save` | Save current session (with auto-summary v2.0) |
+| `/recall search <query>` | **v2.0** Semantic search (embedding-based + keyword fallback) |
+| `/recall context` | **v2.0** Smart context injection (auto-retrieve relevant history) |
 | `/recall browse` | Visual hierarchical browsing (categories → sessions → actions) |
 | `/recall list` | List all saved sessions in a table |
 | `/recall list search <keyword>` | Search sessions by name, summary, or tags |
@@ -72,6 +74,8 @@ Recall creates a **centralized session index** — a management layer that maps 
 | `/recall move` | Move session to a different category |
 | `/recall history` | View version history, compare, or rollback a session |
 | `/recall manage` | Manage categories (add, remove, view stats) |
+| `/recall reindex` | **v2.0** Regenerate all summaries + rebuild search index |
+| `/recall notify setup` | **v2.0** Configure WeChat notifications via Server酱 |
 
 ## Core Features
 
@@ -79,6 +83,10 @@ Recall creates a **centralized session index** — a management layer that maps 
 Save any conversation to a central location with a custom name and category. Default categories: 学习, 生活, 代码, 算法, 论文, 工作, 杂项 — fully customizable.
 
 **Auto-update**: Save a session once, then `/recall save` again anytime for a fresh snapshot — no re-selection needed. Recall detects the existing backup by session ID and silently updates it.
+
+**Auto-save on exit (v2.0)**: Sessions that have been saved at least once are automatically updated when you exit Claude Code (via `SessionEnd` hook). No manual save needed for already-tracked sessions.
+
+**Auto-summary (v2.0)**: Every save generates a structured summary and tags from the session content — extracted topics, files touched, tools used. Pure rule-based, no LLM API cost.
 
 **Filesystem-first detection**: Recall identifies the current session by filesystem modification time, not `sessions-index.json` (which can be stale). This ensures accurate detection even when Claude Code hasn't updated its own index.
 
@@ -107,6 +115,15 @@ The central directory is a git repository. Every `/recall save` auto-commits a s
 - **Recent**: Quick view of your N most recently modified sessions
 - **Stats**: Overview of total sessions, messages, per-category counts, most active category, largest session
 
+### Semantic Search (v2.0)
+Go beyond keyword matching. `/recall search` uses OpenAI embeddings (`text-embedding-3-small`, ~$0.02/M tokens) to find sessions by meaning, not just exact words. Ask "last week's bug discussion" and get results even if you never used those exact words. Falls back to smart keyword search when no API key is configured.
+
+### Smart Context Injection (v2.0)
+Say "根据之前的讨论" or use `/recall context` — Recall automatically retrieves the top-3 most relevant historical sessions and injects their summaries (~600 tokens total) into your current conversation. Like having a memory that remembers what you discussed across all projects.
+
+### Task Completion Notifications (v2.0)
+Configure WeChat notifications via Server酱 (free). When a Claude Code task is marked complete, get a push notification on your phone. Never miss a long-running task finishing. Setup: `/recall notify setup`.
+
 ### Resume from Anywhere
 Select a session from any project, and Recall handles the rest:
 
@@ -125,8 +142,12 @@ When you rename a session in Recall, it updates **both** the central index and t
 |---|---|---|---|
 | Cross-project sessions | No | Yes | Yes |
 | Organize by category | No | Yes | Partial |
-| Search all conversations | No | Yes | Yes |
+| Search all conversations | No | Yes (semantic v2.0) | Yes |
 | Load past context | No | Yes | Yes (persistent) |
+| Smart context injection | No | Yes (v2.0) | Yes |
+| Auto-save on exit | No | Yes (v2.0 hook) | Yes |
+| Session summaries | No | Yes (v2.0 auto) | Partial |
+| Task notifications | No | Yes (v2.0 WeChat) | Partial |
 | Resume from any directory | No | Yes | Yes |
 | Central backup | No | Yes | Yes |
 | Version history & rollback | No | Yes (git) | No |
@@ -136,7 +157,9 @@ When you rename a session in Recall, it updates **both** the central index and t
 | No background processes | Yes | Yes | **No** |
 | No elevated permissions | Yes | Yes | **No** |
 | Works offline | Yes | Yes | Partial |
-| Zero extra API cost | Yes | Yes | **No** (24/7 tokens) |
+| Zero extra API cost | Yes | Yes* | **No** (24/7 tokens) |
+
+\* Semantic search optionally uses OpenAI embeddings (~$0.02/M tokens, negligible cost). All other features are zero-cost.
 
 ## Installation
 
@@ -183,6 +206,16 @@ For those curious about the internals:
 Recall reads these native files and builds an index on top of them — it doesn't replace Claude Code's storage, just adds a cross-project management layer. When `sessions-index.json` is stale, Recall falls back to filesystem modification times for reliable session detection.
 
 ## Changelog
+
+### v2.0.0 — 2026-03-03
+
+- **feat**: Auto-save via `SessionEnd` hook — previously saved sessions auto-update on exit
+- **feat**: Session summary generation — structured summaries + tags extracted from JSONL content
+- **feat**: Semantic search with OpenAI embeddings (`/recall search`) — cosine similarity over session embeddings, keyword fallback
+- **feat**: Smart context injection (`/recall context`) — auto-retrieve relevant history based on current conversation topic
+- **feat**: WeChat task completion notifications via Server酱 (`/recall notify setup`) — `TaskCompleted` hook integration
+- **feat**: Reindex command (`/recall reindex`) — batch regenerate summaries and rebuild search index for all sessions
+- **feat**: SQLite search index (`_index.sqlite`) for fast embedding-based retrieval
 
 ### v1.5.0 — 2026-03-03
 

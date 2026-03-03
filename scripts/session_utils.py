@@ -12,7 +12,9 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -545,6 +547,182 @@ def _extract_readable(entries: list, mode: str = "brief", max_chars: int = 500) 
     return messages
 
 
+def summarize_session(jsonl_path: str, max_summary_chars: int = 300) -> dict:
+    """Generate a structured summary and tags from a session .jsonl file.
+
+    Pure rule-based extraction — no LLM API calls.
+
+    Args:
+        jsonl_path: Path to the .jsonl session file
+        max_summary_chars: Maximum characters for the summary text
+
+    Returns:
+        dict with 'summary' (str) and 'tags' (list of str)
+    """
+    path = Path(_normalize_path(jsonl_path))
+    if not path.exists():
+        return {"summary": "", "tags": []}
+
+    entries = _parse_jsonl_entries(path)
+    if not entries:
+        return {"summary": "", "tags": []}
+
+    # Extract all user messages, assistant messages, and tool uses
+    user_messages = []
+    assistant_messages = []
+    tool_uses = []
+    files_touched = set()
+
+    for _, entry in entries:
+        entry_type = entry.get("type", "")
+        msg = entry.get("message", {})
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+
+        if entry_type == "user":
+            text = ""
+            if isinstance(content, str):
+                text = content.strip()
+            elif isinstance(content, list):
+                text_parts = [p.get("text", "") for p in content
+                              if isinstance(p, dict) and p.get("type") == "text"]
+                text = " ".join(text_parts).strip()
+            if text and not text.startswith("{") and "tool_use_id" not in text:
+                user_messages.append(text)
+
+        elif entry_type == "assistant":
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text":
+                        assistant_messages.append(part.get("text", "").strip())
+                    elif part.get("type") == "tool_use":
+                        tool_name = part.get("name", "")
+                        tool_input = part.get("input", {})
+                        tool_uses.append(tool_name)
+                        # Extract file paths from tool inputs
+                        for key in ("file_path", "path", "pattern"):
+                            val = tool_input.get(key, "")
+                            if val and isinstance(val, str) and ("/" in val or "\\" in val):
+                                # Extract just the filename
+                                fname = val.replace("\\", "/").split("/")[-1]
+                                if "." in fname and len(fname) < 80:
+                                    files_touched.add(fname)
+                        # Extract from bash commands
+                        if tool_name == "Bash":
+                            cmd = tool_input.get("command", "")
+                            # Look for file paths in commands
+                            for m in re.findall(r'[\w./\\-]+\.\w{1,5}', cmd):
+                                fname = m.replace("\\", "/").split("/")[-1]
+                                if len(fname) < 80:
+                                    files_touched.add(fname)
+            elif isinstance(content, str) and content.strip():
+                assistant_messages.append(content.strip())
+
+    # Build summary parts
+    summary_parts = []
+
+    # 1. First user message (topic indicator)
+    if user_messages:
+        first_msg = user_messages[0][:100]
+        summary_parts.append(f"用户请求: {first_msg}")
+
+    # 2. Discussion topics from later messages
+    if len(user_messages) > 3:
+        # Sample a few key user messages to understand topic evolution
+        mid_msgs = user_messages[len(user_messages)//3:2*len(user_messages)//3]
+        if mid_msgs:
+            mid_sample = mid_msgs[0][:60]
+            summary_parts.append(f"中间讨论: {mid_sample}")
+
+    # 3. Files touched
+    if files_touched:
+        file_list = sorted(files_touched)[:10]  # Limit to 10 files
+        summary_parts.append(f"涉及文件: {', '.join(file_list)}")
+
+    # 4. Tool usage summary
+    if tool_uses:
+        tool_counts = Counter(tool_uses)
+        top_tools = tool_counts.most_common(5)
+        tool_str = ", ".join(f"{name}({count})" for name, count in top_tools)
+        summary_parts.append(f"工具使用: {tool_str}")
+
+    # 5. Last assistant response snippet
+    if assistant_messages:
+        last_msg = assistant_messages[-1][:80]
+        summary_parts.append(f"最后回复: {last_msg}")
+
+    # Combine summary
+    summary = " | ".join(summary_parts)
+    if len(summary) > max_summary_chars:
+        summary = summary[:max_summary_chars] + "..."
+
+    # Generate tags
+    tags = _extract_tags(user_messages, assistant_messages, tool_uses, files_touched)
+
+    return {"summary": summary, "tags": tags}
+
+
+def _extract_tags(user_msgs: list, asst_msgs: list, tool_uses: list, files: set) -> list:
+    """Extract meaningful tags from session content.
+
+    Tags are extracted from:
+    - File extensions (programming language indicators)
+    - Tool usage patterns
+    - Common keywords in user messages
+    """
+    tags = set()
+
+    # File extension → language tags
+    ext_to_lang = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript",
+        ".jsx": "react", ".tsx": "react", ".vue": "vue",
+        ".java": "java", ".cpp": "c++", ".c": "c", ".rs": "rust",
+        ".go": "go", ".rb": "ruby", ".php": "php", ".swift": "swift",
+        ".html": "html", ".css": "css", ".scss": "css",
+        ".md": "markdown", ".tex": "latex", ".bib": "latex",
+        ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+        ".sql": "sql", ".sh": "shell", ".bat": "shell",
+        ".ipynb": "jupyter",
+    }
+    for f in files:
+        ext = "." + f.rsplit(".", 1)[-1].lower() if "." in f else ""
+        if ext in ext_to_lang:
+            tags.add(ext_to_lang[ext])
+
+    # Tool usage patterns → activity tags
+    tool_set = set(tool_uses)
+    if "Edit" in tool_set or "Write" in tool_set:
+        tags.add("coding")
+    if "Bash" in tool_set:
+        tags.add("terminal")
+    if "Agent" in tool_set:
+        tags.add("agent")
+    if "WebSearch" in tool_set or "WebFetch" in tool_set:
+        tags.add("web-research")
+
+    # Keyword extraction from user messages
+    all_user_text = " ".join(user_msgs).lower()
+    keyword_map = {
+        "bug": "debugging", "fix": "debugging", "error": "debugging", "debug": "debugging",
+        "test": "testing", "pytest": "testing", "unittest": "testing",
+        "refactor": "refactoring", "重构": "refactoring",
+        "论文": "paper", "paper": "paper", "arxiv": "paper",
+        "git": "git", "commit": "git", "merge": "git",
+        "docker": "docker", "container": "docker",
+        "api": "api", "endpoint": "api",
+        "database": "database", "sql": "database", "db": "database",
+        "deploy": "deployment", "部署": "deployment",
+        "设计": "design", "design": "design",
+        "review": "code-review", "审查": "code-review",
+    }
+    for keyword, tag in keyword_map.items():
+        if keyword in all_user_text:
+            tags.add(tag)
+
+    return sorted(tags)[:15]  # Limit to 15 tags
+
+
 def diff_sessions(old_path: str, new_path: str, mode: str = "brief",
                   max_messages: int = 50, max_chars: int = 500) -> str:
     """Compare two versions of a session and extract incremental content.
@@ -667,6 +845,12 @@ def main():
     check_parser = subparsers.add_parser("check", help="Check original file existence")
     check_parser.add_argument("base_dir", help="Path to the central sessions directory")
 
+    # summarize subcommand
+    summarize_parser = subparsers.add_parser("summarize", help="Generate structured summary and tags")
+    summarize_parser.add_argument("jsonl_path", help="Path to the .jsonl session file")
+    summarize_parser.add_argument("--max-chars", type=int, default=300,
+                                  help="Maximum characters for summary (default: 300)")
+
     # diff subcommand
     diff_parser = subparsers.add_parser("diff", help="Compare two versions of a session")
     diff_parser.add_argument("old_path", help="Path to the older .jsonl version")
@@ -690,6 +874,9 @@ def main():
         print(stats_sessions(args.base_dir))
     elif args.command == "check":
         print(check_sessions(args.base_dir))
+    elif args.command == "summarize":
+        result = summarize_session(args.jsonl_path, args.max_chars)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "diff":
         print(diff_sessions(args.old_path, args.new_path, args.mode,
                             args.max_messages, args.max_chars))
