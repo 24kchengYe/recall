@@ -1,7 +1,9 @@
 \![Visitors](https://visitor-badge.laobi.icu/badge?page_id=24kchengYe.claude-code-recall)
 # Recall — Never Lose a Claude Code Conversation Again
 
-> **Cross-project session manager with category organization, version history, and anti-compaction backup — without sacrificing Claude Code's security model.**
+**Cross-project session manager for Claude Code.** Save, search, organize, and resume conversations across all your projects — with version history and anti-compaction backup.
+
+> Like OpenClaw's persistent memory, but without sacrificing Claude Code's security model.
 
 ## Why Recall?
 
